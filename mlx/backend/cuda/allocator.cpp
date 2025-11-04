@@ -97,15 +97,33 @@ CudaAllocator::CudaAllocator()
 
   int device_count = 0;
   CHECK_CUDA_ERROR(cudaGetDeviceCount(&device_count));
+  int curr;
+  CHECK_CUDA_ERROR(cudaGetDevice(&curr));
   for (int i = 0; i < device_count; ++i) {
     CHECK_CUDA_ERROR(cudaSetDevice(i));
     cudaStream_t s;
     CHECK_CUDA_ERROR(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking));
     free_streams_.push_back(s);
   }
+  CHECK_CUDA_ERROR(cudaSetDevice(curr));
+}
+
+void copy_to_managed(CudaBuffer& buf) {
+  // TODO maybe make this async on a i/o stream to avoid synchronizing the
+  // device on malloc/and free
+  void* new_data;
+  CHECK_CUDA_ERROR(cudaMallocManaged(&new_data, buf.size));
+  buf.device = -1;
+  CHECK_CUDA_ERROR(cudaMemcpy(new_data, buf.data, buf.size, cudaMemcpyDefault));
+  CHECK_CUDA_ERROR(cudaFree(buf.data));
+  buf.data = new_data;
 }
 
 Buffer CudaAllocator::malloc_impl(size_t size, cudaStream_t stream) {
+  if (size == 0) {
+    return Buffer{new CudaBuffer{nullptr, 0, -1}};
+  }
+
   // Find available buffer from cache.
   auto orig_size = size;
   std::unique_lock lock(mutex_);
@@ -115,6 +133,11 @@ Buffer CudaAllocator::malloc_impl(size_t size, cudaStream_t stream) {
     size = next_power_of_2(size);
   } else {
     size = page_size * ((size + page_size - 1) / page_size);
+  }
+
+  int device = -1;
+  if (size > small_block_size && stream != nullptr) {
+    CHECK_CUDA_ERROR(cudaStreamGetDevice(stream, &device));
   }
 
   CudaBuffer* buf = buffer_cache_.reuse_from_cache(size);
@@ -132,10 +155,6 @@ Buffer CudaAllocator::malloc_impl(size_t size, cudaStream_t stream) {
     }
     lock.unlock();
     if (!buf) {
-      int device = -1;
-      if (stream != nullptr) {
-        cudaStreamGetDevice(stream, &device);
-      }
       buf = new CudaBuffer{nullptr, size, device};
       cudaError_t err;
       if (device == -1) {
@@ -157,6 +176,10 @@ Buffer CudaAllocator::malloc_impl(size_t size, cudaStream_t stream) {
   if (get_cache_memory() > max_pool_size_) {
     buffer_cache_.release_cached_buffers(get_cache_memory() - max_pool_size_);
   }
+  // Copy to managed here if the buffer is not on the right device
+  if (buf->device != device) {
+    copy_to_managed(*buf);
+  }
   return Buffer{buf};
 }
 
@@ -171,6 +194,10 @@ Buffer CudaAllocator::malloc(size_t size) {
 void CudaAllocator::free(Buffer buffer) {
   auto* buf = static_cast<CudaBuffer*>(buffer.ptr());
   if (!buf) {
+    return;
+  }
+  if (buf->size == 0) {
+    delete buf;
     return;
   }
 
@@ -275,15 +302,7 @@ void* Buffer::raw_ptr() {
   }
   auto& cbuf = *static_cast<cu::CudaBuffer*>(ptr_);
   if (cbuf.device != -1) {
-    // TODO maybe make this async on a i/o stream to avoid synchronizing the
-    // device on malloc/and free
-    void* new_data;
-    CHECK_CUDA_ERROR(cudaMallocManaged(&new_data, cbuf.size));
-    cbuf.device = -1;
-    CHECK_CUDA_ERROR(
-        cudaMemcpy(new_data, cbuf.data, cbuf.size, cudaMemcpyDefault));
-    CHECK_CUDA_ERROR(cudaFree(cbuf.data));
-    cbuf.data = new_data;
+    copy_to_managed(cbuf);
   }
   return cbuf.data;
 }
