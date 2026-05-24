@@ -2,6 +2,8 @@
 
 #include <dlfcn.h>
 #include <unistd.h>
+#include <cerrno>
+#include <cstring>
 #include <iostream>
 #include <sstream>
 
@@ -27,6 +29,38 @@ void* page_aligned_alloc(size_t num_bytes) {
     return nullptr;
   }
   return buf;
+}
+
+const char* errno_name(int value) {
+  switch (value) {
+    case EBUSY:
+      return "EBUSY";
+    case ENOMEM:
+      return "ENOMEM";
+    case ETIMEDOUT:
+      return "ETIMEDOUT";
+    default:
+      return nullptr;
+  }
+}
+
+void append_errno(std::ostringstream& msg, int value) {
+  if (value == 0) {
+    return;
+  }
+  msg << " (errno " << value;
+  if (auto name = errno_name(value)) {
+    msg << " " << name;
+  }
+  msg << ")";
+}
+
+void append_provider_resource_hint(std::ostringstream& msg, int value) {
+  if (value == EBUSY || value == ENOMEM || value == 0) {
+    msg << "; hint: AppleThunderboltRDMA provider resources may be exhausted "
+        << "or contaminated for this boot; stop live RDMA probes and reboot "
+        << "the affected node before retrying";
+  }
 }
 
 } // namespace
@@ -139,22 +173,31 @@ Connection::~Connection() {
 }
 
 void Connection::allocate_protection_domain() {
+  errno = 0;
   protection_domain = ibv().alloc_pd(ctx);
   if (protection_domain == nullptr) {
-    throw std::runtime_error("[jaccl] Couldn't allocate protection domain");
+    std::ostringstream msg;
+    msg << "[jaccl] Couldn't allocate protection domain";
+    append_errno(msg, errno);
+    append_provider_resource_hint(msg, errno);
+    throw std::runtime_error(msg.str());
   }
 }
 
 void Connection::create_completion_queue(int num_entries) {
+  errno = 0;
   completion_queue = ibv().create_cq(ctx, num_entries, nullptr, nullptr, 0);
   if (completion_queue == nullptr) {
-    throw std::runtime_error("[jaccl] Couldn't create completion queue");
+    std::ostringstream msg;
+    msg << "[jaccl] Couldn't create completion queue";
+    append_errno(msg, errno);
+    append_provider_resource_hint(msg, errno);
+    throw std::runtime_error(msg.str());
   }
 }
 
 void Connection::create_queue_pair() {
-  ibv_qp_init_attr init_attr;
-  init_attr.qp_context = ctx;
+  ibv_qp_init_attr init_attr = {};
   init_attr.qp_context = ctx;
   init_attr.send_cq = completion_queue;
   init_attr.recv_cq = completion_queue;
@@ -167,10 +210,15 @@ void Connection::create_queue_pair() {
   init_attr.qp_type = IBV_QPT_UC;
   init_attr.sq_sig_all = 0;
 
+  errno = 0;
   queue_pair = ibv().create_qp(protection_domain, &init_attr);
 
   if (queue_pair == nullptr) {
-    throw std::runtime_error("[jaccl] Couldn't create queue pair");
+    std::ostringstream msg;
+    msg << "[jaccl] Couldn't create queue pair";
+    append_errno(msg, errno);
+    append_provider_resource_hint(msg, errno);
+    throw std::runtime_error(msg.str());
   }
 }
 
@@ -212,9 +260,12 @@ void Connection::queue_pair_init() {
   int mask =
       IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS;
 
+  errno = 0;
   if (int status = ibv().modify_qp(queue_pair, &attr, mask); status != 0) {
     std::ostringstream msg;
-    msg << "[jaccl] Changing queue pair to INIT failed with errno " << status;
+    msg << "[jaccl] Changing queue pair to INIT failed";
+    append_errno(msg, status);
+    append_provider_resource_hint(msg, status);
     throw std::invalid_argument(msg.str());
   }
 }
@@ -242,9 +293,13 @@ void Connection::queue_pair_rtr(const Destination& dst) {
   int mask = IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN |
       IBV_QP_RQ_PSN;
 
+  errno = 0;
   if (int status = ibv().modify_qp(queue_pair, &attr, mask); status != 0) {
     std::ostringstream msg;
-    msg << "[jaccl] Changing queue pair to RTR failed with errno " << status;
+    msg << "[jaccl] Changing queue pair to RTR failed"
+        << " mask=0x" << std::hex << mask << std::dec;
+    append_errno(msg, status);
+    append_provider_resource_hint(msg, status);
     throw std::invalid_argument(msg.str());
   }
 }
@@ -256,9 +311,12 @@ void Connection::queue_pair_rts() {
 
   int mask = IBV_QP_STATE | IBV_QP_SQ_PSN;
 
+  errno = 0;
   if (int status = ibv().modify_qp(queue_pair, &attr, mask); status != 0) {
     std::ostringstream msg;
-    msg << "[jaccl] Changing queue pair to RTS failed with errno " << status;
+    msg << "[jaccl] Changing queue pair to RTS failed";
+    append_errno(msg, status);
+    append_provider_resource_hint(msg, status);
     throw std::invalid_argument(msg.str());
   }
 }
