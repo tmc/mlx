@@ -3,6 +3,7 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <sstream>
@@ -63,15 +64,29 @@ void append_provider_resource_hint(std::ostringstream& msg, int value) {
   }
 }
 
+bool bench_trace_enabled() {
+  const char* env = std::getenv("JACCL_BENCH_TRACE");
+  return env != nullptr && env[0] != '\0' && std::strcmp(env, "0") != 0;
+}
+
+void bench_trace(const std::string& msg) {
+  if (bench_trace_enabled()) {
+    std::cerr << IBV_TAG << " trace " << msg << std::endl;
+  }
+}
+
 } // namespace
 
 namespace jaccl {
 
 IBVWrapper::IBVWrapper() {
+  bench_trace("dlopen librdma.dylib start");
   librdma_handle_ = dlopen("librdma.dylib", RTLD_NOW | RTLD_GLOBAL);
   if (librdma_handle_ == nullptr) {
+    bench_trace("dlopen librdma.dylib failed");
     return;
   }
+  bench_trace("dlopen librdma.dylib done");
 
   LOAD_SYMBOL(ibv_get_device_list, get_device_list);
   LOAD_SYMBOL(ibv_get_device_name, get_device_name);
@@ -147,6 +162,7 @@ Connection::Connection(ibv_context* ctx_)
       completion_queue(nullptr),
       queue_pair(nullptr) {
   src.local_id = -1;
+  src.source_gid_index = -1;
 }
 
 Connection::Connection(Connection&& c) : Connection(nullptr) {
@@ -229,21 +245,27 @@ const Destination& Connection::info() {
 
   ibv_port_attr port_attr;
   ibv().query_port(ctx, 1, &port_attr);
-  ibv_gid gid;
+  ibv_gid gid = {};
+  int source_gid_index = -1;
   for (int i = 0; i < port_attr.gid_tbl_len; i++) {
     ibv_gid tmp;
     if (ibv().query_gid(ctx, 1, i, &tmp) == 0) {
       if (*(uint64_t*)&tmp.raw[0] == 0 && *(uint16_t*)&tmp.raw[8] == 0 &&
           *(uint16_t*)&tmp.raw[10] == 0xffff) {
         gid = tmp;
+        source_gid_index = i;
         break;
       }
     }
+  }
+  if (source_gid_index < 0) {
+    throw std::runtime_error("[jaccl] No IPv4-mapped source GID found");
   }
 
   src.local_id = port_attr.lid;
   src.queue_pair_number = queue_pair->qp_num;
   src.packet_sequence_number = 7;
+  src.source_gid_index = source_gid_index;
   src.global_identifier = gid;
 
   return src;
@@ -287,7 +309,7 @@ void Connection::queue_pair_rtr(const Destination& dst) {
     attr.ah_attr.is_global = 1;
     attr.ah_attr.grh.hop_limit = 1;
     attr.ah_attr.grh.dgid = dst.global_identifier;
-    attr.ah_attr.grh.sgid_index = 1;
+    attr.ah_attr.grh.sgid_index = src.source_gid_index;
   }
 
   int mask = IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN |
@@ -325,26 +347,39 @@ std::vector<Connection> create_connections(
     const std::vector<std::string>& device_names) {
   std::vector<Connection> connections;
   int num_devices = 0;
+  bench_trace("get_device_list start");
   ibv_device** devices = ibv().get_device_list(&num_devices);
+  bench_trace("get_device_list done count=" + std::to_string(num_devices));
   for (auto& name : device_names) {
     // Empty so add a nullptr context
     if (name.empty()) {
+      bench_trace("create_connections skip empty device");
       connections.emplace_back(nullptr);
       continue;
     }
 
     // Search for the name and try to open the device
+    bench_trace("create_connections search device=" + name);
+    bool found = false;
     for (int i = 0; i < num_devices; i++) {
       if (name == ibv().get_device_name(devices[i])) {
+        found = true;
+        bench_trace("open_device start device=" + name);
         auto ctx = ibv().open_device(devices[i]);
         if (ctx == nullptr) {
           std::ostringstream msg;
           msg << "[jaccl] Could not open device " << name;
           throw std::runtime_error(msg.str());
         }
+        bench_trace("open_device done device=" + name);
         connections.emplace_back(ctx);
         break;
       }
+    }
+    if (!found) {
+      std::ostringstream msg;
+      msg << "[jaccl] RDMA device " << name << " not found";
+      throw std::runtime_error(msg.str());
     }
   }
   ibv().free_device_list(devices);
@@ -354,36 +389,53 @@ std::vector<Connection> create_connections(
 
 SideChannel::SideChannel(int rank, int size, const char* addr)
     : rank_(rank), size_(size) {
+  bench_trace(
+      "side_channel start rank=" + std::to_string(rank_) +
+      " size=" + std::to_string(size_) + " addr=" + std::string(addr));
   auto address = parse_address(addr);
 
   if (rank_ == 0) {
     TCPSocket server(IBV_TAG);
+    bench_trace("side_channel listen start");
     server.listen(IBV_TAG, address);
+    bench_trace("side_channel listen done");
 
     for (int i = 0; i < size - 1; i++) {
+      bench_trace("side_channel accept start index=" + std::to_string(i));
       sockets_.push_back(server.accept(IBV_TAG));
+      bench_trace("side_channel accept done index=" + std::to_string(i));
     }
 
     std::vector<int> ranks(size - 1);
     for (int i = 0; i < size - 1; i++) {
+      bench_trace("side_channel recv rank start index=" + std::to_string(i));
       sockets_[i].recv(
           IBV_TAG, reinterpret_cast<char*>(&ranks[i]), sizeof(int));
       ranks[i]--;
+      bench_trace(
+          "side_channel recv rank done index=" + std::to_string(i) +
+          " rank=" + std::to_string(ranks[i]));
     }
     for (int i = 0; i < size - 1; i++) {
       while (i != ranks[i]) {
-        std::swap(sockets_[i], sockets_[ranks[i]]);
-        std::swap(ranks[i], ranks[ranks[i]]);
+        int target = ranks[i];
+        std::swap(sockets_[i], sockets_[target]);
+        std::swap(ranks[i], ranks[target]);
       }
     }
+    bench_trace("side_channel rank0 done");
   } else {
+    bench_trace("side_channel connect start");
     sockets_.push_back(
         TCPSocket::connect(
             IBV_TAG, address, 4, 1000, [](int attempt, int wait) {
               std::cerr << IBV_TAG << " Connection attempt " << attempt
                         << " waiting " << wait << " ms" << std::endl;
             }));
+    bench_trace("side_channel connect done");
+    bench_trace("side_channel send rank start");
     sockets_[0].send(IBV_TAG, reinterpret_cast<char*>(&rank_), sizeof(int));
+    bench_trace("side_channel send rank done");
   }
 }
 

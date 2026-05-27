@@ -11,7 +11,7 @@
 //     ./jaccl_allreduce_bench [-w <warmup_iters>] [-n <iters>]
 //                             [-b <min_bytes>] [-e <max_bytes>]
 //                             [-f <step_factor>] [-d <datatype>]
-//                             [-c] [-h]
+//                             [-c] [--csv] [-h]
 //
 //   Or use the MLX launcher:
 //
@@ -26,6 +26,7 @@
 //   -f  Multiplicative step factor          (default: 2)
 //   -d  Datatype: float32, float16, bfloat16 (default: float32)
 //   -c  Check correctness                   (default: off)
+//   --csv  Print comma-separated rows       (default: table)
 //   -h  Print this help message
 
 #include <jaccl/jaccl.h>
@@ -35,6 +36,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -52,6 +54,7 @@ static void usage(const char* prog) {
       << "  -f <factor>    Multiplicative step factor  (default: 2)\n"
       << "  -d <dtype>     float32|float16|bfloat16    (default: float32)\n"
       << "  -c             Check correctness\n"
+      << "  --csv          Print CSV output\n"
       << "  -h             Show this help\n";
 }
 
@@ -88,7 +91,7 @@ static double bus_factor(int nranks) {
   return 2.0 * (nranks - 1) / static_cast<double>(nranks);
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   int warmup_iters = 5;
   int timed_iters = 20;
   size_t min_bytes = 1024;
@@ -96,6 +99,7 @@ int main(int argc, char** argv) {
   int step_factor = 2;
   std::string dtype_str = "float32";
   bool check = false;
+  bool csv = false;
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
@@ -116,6 +120,8 @@ int main(int argc, char** argv) {
       dtype_str = argv[++i];
     } else if (arg == "-c") {
       check = true;
+    } else if (arg == "--csv") {
+      csv = true;
     } else {
       std::cerr << "Unknown option: " << arg << "\n";
       usage(argv[0]);
@@ -139,12 +145,29 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  if (std::getenv("JACCL_BENCH_TRACE")) {
+    std::cerr << "[jaccl_bench] before init rank="
+              << (std::getenv("JACCL_RANK") ? std::getenv("JACCL_RANK") : "")
+              << " coordinator="
+              << (std::getenv("JACCL_COORDINATOR")
+                      ? std::getenv("JACCL_COORDINATOR")
+                      : "")
+              << " devices="
+              << (std::getenv("JACCL_IBV_DEVICES")
+                      ? std::getenv("JACCL_IBV_DEVICES")
+                      : "")
+              << "\n";
+  }
   auto group = jaccl::init(/* strict= */ true);
 
   int rank = group->rank();
   int nranks = group->size();
+  if (std::getenv("JACCL_BENCH_TRACE")) {
+    std::cerr << "[jaccl_bench] after init rank=" << rank
+              << " size=" << nranks << "\n";
+  }
 
-  if (rank == 0) {
+  if (rank == 0 && !csv) {
     std::cout << "# JACCL All-Reduce Benchmark\n"
               << "# Ranks:   " << nranks << "\n"
               << "# Dtype:   " << dtype_str << "\n"
@@ -168,13 +191,21 @@ int main(int argc, char** argv) {
               << std::setw(14) << "(GB/s)";
     if (check)
       std::cout << std::setw(10) << "";
-    std::cout << "\n";
+    std::cout << "\n" << std::flush;
+  } else if (rank == 0) {
+    std::cout
+        << "op,bytes,count,dtype,ranks,warmup_iters,timed_iters,time_us,"
+           "algo_gbps,bus_gbps";
+    if (check)
+      std::cout << ",check";
+    std::cout << "\n" << std::flush;
   }
 
   size_t max_elems = max_bytes / elem_size;
   max_bytes = max_elems * elem_size;
 
   std::vector<char> sendbuf(max_bytes);
+  std::vector<char> recvbuf(max_bytes);
 
   // Fill send buffer with a simple deterministic pattern (rank + 1) casted to
   // the target type, so correctness checks are straightforward: after all_sum
@@ -239,13 +270,13 @@ int main(int argc, char** argv) {
 
     // Warmup
     for (int i = 0; i < warmup_iters; i++) {
-      group->all_sum(sendbuf.data(), sendbuf.data(), n, dtype);
+      group->all_sum(sendbuf.data(), recvbuf.data(), n, dtype);
     }
 
     // Timed iterations
     auto t0 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < timed_iters; i++) {
-      group->all_sum(sendbuf.data(), sendbuf.data(), n, dtype);
+      group->all_sum(sendbuf.data(), recvbuf.data(), n, dtype);
     }
     auto t1 = std::chrono::high_resolution_clock::now();
 
@@ -261,26 +292,39 @@ int main(int argc, char** argv) {
     std::string check_result;
     if (check) {
       fill_buffer(sendbuf.data(), n);
-      group->all_sum(sendbuf.data(), sendbuf.data(), n, dtype);
-      check_result = check_buffer(sendbuf.data(), n) ? "OK" : "FAIL";
+      group->all_sum(sendbuf.data(), recvbuf.data(), n, dtype);
+      check_result = check_buffer(recvbuf.data(), n) ? "OK" : "FAIL";
     }
 
     if (rank == 0) {
-      std::cout << std::left << std::setw(14) << n << std::right
-                << std::setw(12) << count << std::setw(12) << dtype_str
-                << std::setw(14) << std::fixed << std::setprecision(1) << avg_us
-                << std::setw(14) << std::fixed << std::setprecision(2)
-                << algo_bw << std::setw(14) << std::fixed
-                << std::setprecision(2) << bus_bw;
-      if (check)
-        std::cout << std::setw(10) << check_result;
+      if (csv) {
+        std::cout << "all_sum," << n << "," << count << "," << dtype_str
+                  << "," << nranks << "," << warmup_iters << ","
+                  << timed_iters << "," << std::fixed << std::setprecision(3)
+                  << avg_us << "," << std::fixed << std::setprecision(6)
+                  << algo_bw << "," << bus_bw;
+        if (check)
+          std::cout << "," << check_result;
+      } else {
+        std::cout << std::left << std::setw(14) << n << std::right
+                  << std::setw(12) << count << std::setw(12) << dtype_str
+                  << std::setw(14) << std::fixed << std::setprecision(1)
+                  << avg_us << std::setw(14) << std::fixed
+                  << std::setprecision(2) << algo_bw << std::setw(14)
+                  << std::fixed << std::setprecision(2) << bus_bw;
+        if (check)
+          std::cout << std::setw(10) << check_result;
+      }
       std::cout << "\n";
     }
   }
 
-  if (rank == 0) {
+  if (rank == 0 && !csv) {
     std::cout << "# Done.\n";
   }
 
   return 0;
+} catch (const std::exception& e) {
+  std::cerr << "jaccl_allreduce_bench: " << e.what() << "\n";
+  return 2;
 }

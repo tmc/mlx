@@ -90,6 +90,7 @@ struct Destination {
   int local_id;
   int queue_pair_number;
   int packet_sequence_number;
+  int source_gid_index;
   ibv_gid global_identifier;
 };
 
