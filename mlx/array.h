@@ -15,6 +15,10 @@
 
 namespace mlx::core {
 
+namespace debug::detail {
+struct ArrayAccess;
+}
+
 // Forward declaration
 class Primitive;
 
@@ -471,6 +475,8 @@ class MLX_API array {
   ~array();
 
  private:
+  friend struct debug::detail::ArrayAccess;
+
   // Initialize the arrays data
   template <typename It>
   void init(const It src);
