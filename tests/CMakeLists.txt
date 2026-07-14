@@ -5,9 +5,14 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(doctest)
 
 add_executable(tests ${PROJECT_SOURCE_DIR}/tests/tests.cpp)
+target_sources(tests PRIVATE debug_tests.cpp)
 
 if(MLX_BUILD_METAL OR MLX_BUILD_CUDA)
   set(METAL_TEST_SOURCES gpu_tests.cpp)
+endif()
+
+if(MLX_BUILD_METAL)
+  list(APPEND METAL_TEST_SOURCES metal_debug_tests.cpp)
 endif()
 
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)

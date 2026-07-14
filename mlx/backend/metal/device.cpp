@@ -10,10 +10,12 @@
 #define MTL_PRIVATE_IMPLEMENTATION
 
 #include "mlx/backend/common/utils.h"
+#include "mlx/backend/metal/debug.h"
 #include "mlx/backend/metal/device.h"
 #include "mlx/backend/metal/event.h"
 #include "mlx/backend/metal/metal.h"
 #include "mlx/backend/metal/utils.h"
+#include "mlx/debug_internal.h"
 #include "mlx/utils.h"
 
 namespace std {
@@ -308,9 +310,9 @@ MTL::Library* load_library(
 
 CommandEncoder::CommandEncoder(
     Device& d,
-    int index,
+    Stream stream,
     ResidencySet& residency_set)
-    : device_(d) {
+    : device_(d), stream_(stream) {
   auto pool = new_scoped_memory_pool();
   queue_ = NS::TransferPtr(device_.mtl_device()->newCommandQueue());
   if (!queue_) {
@@ -320,7 +322,13 @@ CommandEncoder::CommandEncoder(
   if (residency_set.mtl_residency_set()) {
     queue_->addResidencySet(residency_set.mtl_residency_set());
   }
-  debug_set_stream_queue_label(queue_.get(), index);
+  stream_label_generation_ = debug::detail::stream_label_generation();
+  if (stream_label_generation_ != 0) {
+    auto label = debug::detail::stream_label(stream_);
+    if (!label.empty()) {
+      set_queue_label(label);
+    }
+  }
   buffer_ = NS::RetainPtr(queue_->commandBufferWithUnretainedReferences());
 }
 
@@ -355,6 +363,9 @@ void CommandEncoder::set_input_array(
   needs_barrier_ =
       needs_barrier_ | (prev_outputs_.find(r_buf) != prev_outputs_.end());
   auto a_buf = static_cast<const MTL::Buffer*>(a.buffer().ptr());
+  // Label the buffer with array information for better debugging
+  set_buffer_debug_label(const_cast<MTL::Buffer*>(a_buf), &a);
+
   get_command_encoder()->setBuffer(a_buf, a.offset() + offset, idx);
 }
 
@@ -426,6 +437,15 @@ void CommandEncoder::barrier() {
   get_command_encoder()->memoryBarrier(MTL::BarrierScopeBuffers);
 }
 
+void CommandEncoder::set_queue_label(const std::string& label) {
+  auto pool = new_scoped_memory_pool();
+  queue_->setLabel(NS::String::string(label.c_str(), NS::UTF8StringEncoding));
+}
+
+void CommandEncoder::set_next_command_buffer_label(std::string label) {
+  pending_buffer_label_ = std::move(label);
+}
+
 void CommandEncoder::end_encoding() {
   // Each command encoder has a unique fence. We also store a map of
   // all previous outputs of command encoders to their corresponding fence.
@@ -441,6 +461,11 @@ void CommandEncoder::end_encoding() {
   //   outputs since they don't need synchronization.
   if (!encoder_) {
     return;
+  }
+
+  while (applied_debug_groups_ != 0) {
+    encoder_->popDebugGroup();
+    --applied_debug_groups_;
   }
 
   // Remove temporaries from inputs and outputs.
@@ -557,6 +582,13 @@ void CommandEncoder::commit(std::function<void()> completion) {
       });
   buffer_->commit();
   buffer_ = NS::RetainPtr(queue_->commandBufferWithUnretainedReferences());
+  if (!pending_buffer_label_.empty()) {
+    auto pool = new_scoped_memory_pool();
+    buffer_->setLabel(
+        NS::String::string(
+            pending_buffer_label_.c_str(), NS::UTF8StringEncoding));
+    pending_buffer_label_.clear();
+  }
   buffer_ops_ = 0;
   buffer_sizes_ = 0;
 }
@@ -575,13 +607,40 @@ void CommandEncoder::synchronize() {
 }
 
 MTL::ComputeCommandEncoder* CommandEncoder::get_command_encoder() {
+  auto generation = debug::detail::stream_label_generation();
+  if (generation != stream_label_generation_) {
+    auto label = debug::detail::stream_label(stream_);
+    if (!label.empty()) {
+      set_queue_label(label);
+    }
+    stream_label_generation_ = generation;
+  }
   if (!encoder_) {
     encoder_ = NS::RetainPtr(
         buffer_->computeCommandEncoder(MTL::DispatchTypeConcurrent));
+    set_encoder_debug_label(encoder_.get(), "ComputeEncoder");
+    debug_group_generation_ = 0;
     fence_ = NS::TransferPtr(device_.mtl_device()->newFence());
     // Reset error when user starts to encode new commands, they are supposed to
     // have handled the error in synchronize() or Event::wait().
     error_.reset();
+  }
+  if (applied_debug_groups_ != 0 || debug::detail::has_groups()) {
+    auto group_generation = debug::detail::group_generation(stream_);
+    if (group_generation == debug_group_generation_) {
+      return encoder_.get();
+    }
+    auto pool = new_scoped_memory_pool();
+    while (applied_debug_groups_ != 0) {
+      encoder_->popDebugGroup();
+      --applied_debug_groups_;
+    }
+    for (const auto& group : debug::detail::groups(stream_)) {
+      encoder_->pushDebugGroup(
+          NS::String::string(group.c_str(), NS::UTF8StringEncoding));
+      ++applied_debug_groups_;
+    }
+    debug_group_generation_ = group_generation;
   }
   return encoder_.get();
 }

@@ -3,9 +3,11 @@
 #include "mlx/backend/cuda/device.h"
 #include "mlx/backend/cuda/worker.h"
 #include "mlx/backend/gpu/device_info.h"
+#include "mlx/debug_internal.h"
 #include "mlx/utils.h"
 
 #include <fmt/format.h>
+#include <nvtx3/nvToolsExtCudaRt.h>
 #include <nvtx3/nvtx3.hpp>
 #include <future>
 #include <unordered_set>
@@ -202,14 +204,28 @@ std::pair<int, int> get_graph_limits(Device& d) {
   return {env::max_ops_per_buffer(ops), env::max_mb_per_buffer(mb)};
 }
 
-CommandEncoder::CommandEncoder(Device& d)
+CommandEncoder::CommandEncoder(Device& d, Stream stream)
     : device_(d),
+      logical_stream_(stream),
       stream_(d),
       graph_(d),
       worker_(std::make_shared<Worker>(d)),
       graph_cache_("MLX_CUDA_GRAPH_CACHE_SIZE", /* default_capacity */ 400) {
   std::tie(max_ops_per_graph_, max_mb_per_graph_) = get_graph_limits(d);
+  refresh_stream_label();
   worker_->start();
+}
+
+void CommandEncoder::refresh_stream_label() {
+  auto generation = debug::detail::stream_label_generation();
+  if (generation == stream_label_generation_) {
+    return;
+  }
+  auto label = debug::detail::stream_label(logical_stream_);
+  if (!label.empty()) {
+    nvtxNameCudaStreamA(stream_, label.c_str());
+  }
+  stream_label_generation_ = generation;
 }
 
 CommandEncoder::~CommandEncoder() {
@@ -574,6 +590,7 @@ CommandEncoder& get_command_encoder(Stream s) {
               "There is no Stream(gpu, {}) in current thread.", s.index));
     }
   }
+  it->second.refresh_stream_label();
   return it->second;
 }
 

@@ -2,8 +2,10 @@
 #include <memory>
 
 #include "mlx/backend/gpu/eval.h"
+#include "mlx/backend/metal/debug.h"
 #include "mlx/backend/metal/device.h"
 #include "mlx/backend/metal/utils.h"
+#include "mlx/debug.h"
 #include "mlx/primitives.h"
 #include "mlx/scheduler.h"
 #include "mlx/utils.h"
@@ -16,14 +18,14 @@ void new_stream(Stream s) {
   assert(s.device == Device::gpu);
   auto& encoders = metal::get_command_encoders();
   auto& d = metal::device(s.device);
-  encoders.try_emplace(s.index, d, s.index, d.residency_set());
+  encoders.try_emplace(s.index, d, s, d.residency_set());
 }
 
 void new_thread_unsafe_stream(Stream s) {
   assert(s.device == Device::gpu);
   auto& encoders = metal::get_global_command_encoders();
   auto& d = metal::device(s.device);
-  encoders.try_emplace(s.index, d, s.index, d.residency_set());
+  encoders.try_emplace(s.index, d, s, d.residency_set());
 }
 
 void eval(array& arr) {
@@ -41,7 +43,24 @@ void eval(array& arr) {
       inputs = arr.inputs();
     }
 
-    debug_set_primitive_buffer_label(command_buffer, arr.primitive());
+    auto& user_label = debug::current_label();
+    if (!user_label.empty()) {
+      std::string label = user_label;
+#ifdef MLX_METAL_DEBUG
+      label += ':';
+      label += arr.primitive().name();
+#endif
+      command_buffer->setLabel(
+          NS::String::string(label.c_str(), NS::UTF8StringEncoding));
+    }
+#ifdef MLX_METAL_DEBUG
+    else if (metal::automatic_debug_labels()) {
+      auto label = std::string(arr.primitive().name());
+      command_buffer->setLabel(
+          NS::String::string(label.c_str(), NS::UTF8StringEncoding));
+    }
+#endif
+
     arr.primitive().eval_gpu(arr.inputs(), outputs);
   }
   std::unordered_set<std::shared_ptr<array::Data>> buffers;

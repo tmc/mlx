@@ -24,27 +24,6 @@ inline NS::String* make_string(std::ostringstream& os) {
   return NS::String::string(string.c_str(), NS::UTF8StringEncoding);
 }
 
-inline void debug_set_stream_queue_label(MTL::CommandQueue* queue, int index) {
-#ifdef MLX_METAL_DEBUG
-  std::ostringstream label;
-  label << "Stream " << index;
-  queue->setLabel(make_string(label));
-#endif
-}
-
-inline void debug_set_primitive_buffer_label(
-    MTL::CommandBuffer* command_buffer,
-    Primitive& primitive) {
-#ifdef MLX_METAL_DEBUG
-  std::ostringstream label;
-  if (auto cbuf_label = command_buffer->label(); cbuf_label) {
-    label << cbuf_label->utf8String();
-  }
-  label << primitive.name();
-  command_buffer->setLabel(make_string(label));
-#endif
-}
-
 template <typename T>
 constexpr bool is_numeric_except_char = std::is_arithmetic_v<T> &&
     !std::is_same_v<T, char> && !std::is_same_v<T, signed char> &&

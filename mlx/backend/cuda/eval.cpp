@@ -5,11 +5,62 @@
 #include "mlx/backend/cuda/cublas_utils.h"
 #include "mlx/backend/cuda/cudnn_utils.h"
 #include "mlx/backend/cuda/event.h"
+#include "mlx/debug.h"
+#include "mlx/debug_internal.h"
 #include "mlx/primitives.h"
 #include "mlx/scheduler.h"
 #include "mlx/utils.h"
 
+#include <nvtx3/nvToolsExt.h>
 #include <nvtx3/nvtx3.hpp>
+
+namespace {
+
+class DebugRange {
+ public:
+  DebugRange(const mlx::core::array& arr) {
+    auto stream = arr.primitive().stream();
+    std::string label = mlx::core::debug::current_label();
+    if (mlx::core::debug::detail::has_groups()) {
+      for (const auto& group : mlx::core::debug::detail::groups(stream)) {
+        if (!label.empty()) {
+          label += ':';
+        }
+        label += group;
+      }
+    }
+    if (mlx::core::debug::detail::has_labels()) {
+      for (const auto& input : arr.inputs()) {
+        auto input_label = mlx::core::debug::detail::label(input);
+        if (!input_label.empty()) {
+          label += label.empty() ? "input=" : ":input=";
+          label += input_label;
+        }
+      }
+      auto output_label = mlx::core::debug::detail::label(arr);
+      if (!output_label.empty()) {
+        label += label.empty() ? "output=" : ":output=";
+        label += output_label;
+      }
+    }
+    if (!label.empty()) {
+      label += ':';
+      label += arr.primitive().name();
+      nvtxRangePushA(label.c_str());
+      active_ = true;
+    }
+  }
+  ~DebugRange() {
+    if (active_) {
+      nvtxRangePop();
+    }
+  }
+
+ private:
+  bool active_{false};
+};
+
+} // namespace
 
 namespace mlx::core::gpu {
 
@@ -28,18 +79,19 @@ void new_stream(Stream s) {
   assert(s.device == Device::gpu);
   auto& encoders = cu::get_command_encoders();
   auto& d = cu::device(s.device);
-  encoders.try_emplace(s.index, d);
+  encoders.try_emplace(s.index, d, s);
 }
 
 void new_thread_unsafe_stream(Stream s) {
   assert(s.device == Device::gpu);
   auto& encoders = cu::get_global_command_encoders();
   auto& d = cu::device(s.device);
-  encoders.try_emplace(s.index, d);
+  encoders.try_emplace(s.index, d, s);
 }
 
 void eval(array& arr) {
   nvtx3::scoped_range r("gpu::eval");
+  DebugRange debug_range(arr);
   // Ensure CUDA context is active on this thread. Required when MLX is called
   // from threads that have not yet established a CUDA context (e.g. thread
   // pools, language runtimes that migrate work across OS threads).

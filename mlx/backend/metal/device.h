@@ -25,7 +25,7 @@ class EventImpl;
 
 class MLX_API CommandEncoder {
  public:
-  CommandEncoder(Device& d, int index, ResidencySet& residency_set);
+  CommandEncoder(Device& d, Stream stream, ResidencySet& residency_set);
   ~CommandEncoder();
 
   CommandEncoder(const CommandEncoder&) = delete;
@@ -102,15 +102,20 @@ class MLX_API CommandEncoder {
     return buffer_.get();
   }
 
+  void set_queue_label(const std::string& label);
+  void set_next_command_buffer_label(std::string label);
+
  private:
   MTL::ComputeCommandEncoder* get_command_encoder();
 
   Device& device_;
+  Stream stream_;
   bool exiting_{false};
 
   // Buffer that stores encoded commands.
   NS::SharedPtr<MTL::CommandQueue> queue_;
   NS::SharedPtr<MTL::CommandBuffer> buffer_;
+  std::string pending_buffer_label_;
   int buffer_ops_{0};
   size_t buffer_sizes_{0};
 
@@ -125,6 +130,9 @@ class MLX_API CommandEncoder {
   // The members are used within a single ComputeCommandEncoder and will be
   // reset after calling end_encoding().
   NS::SharedPtr<MTL::ComputeCommandEncoder> encoder_;
+  size_t applied_debug_groups_{0};
+  uint64_t debug_group_generation_{0};
+  uint64_t stream_label_generation_{0};
   NS::SharedPtr<MTL::Fence> fence_;
   bool needs_barrier_{false};
   bool concurrent_{false};

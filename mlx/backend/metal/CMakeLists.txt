@@ -151,6 +151,8 @@ target_sources(
           ${CMAKE_CURRENT_SOURCE_DIR}/resident.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/utils.cpp)
 
+target_sources(mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/debug.cpp)
+
 if(NOT MLX_METAL_PATH)
   set(MLX_METAL_PATH ${CMAKE_CURRENT_BINARY_DIR}/kernels/)
 endif()

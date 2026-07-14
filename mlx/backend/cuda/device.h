@@ -33,7 +33,7 @@ class CommandEncoder {
     CommandEncoder& enc;
   };
 
-  explicit CommandEncoder(Device& d);
+  CommandEncoder(Device& d, Stream stream);
   ~CommandEncoder();
 
   CommandEncoder(const CommandEncoder&) = delete;
@@ -121,6 +121,8 @@ class CommandEncoder {
     return stream_;
   }
 
+  void refresh_stream_label();
+
   // Wait until kernels and completion handlers are finished
   void synchronize();
 
@@ -142,6 +144,7 @@ class CommandEncoder {
   void insert_graph_dependencies(std::vector<GraphNode> nodes);
 
   Device& device_;
+  Stream logical_stream_;
   CudaStream stream_;
   CudaGraph graph_;
   std::shared_ptr<Worker> worker_;
@@ -161,6 +164,7 @@ class CommandEncoder {
   bool is_graph_updatable_{true};
   int max_ops_per_graph_;
   int max_mb_per_graph_;
+  uint64_t stream_label_generation_{0};
 };
 
 class Device {
