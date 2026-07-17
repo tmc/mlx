@@ -6,6 +6,7 @@
 #include "mlx/backend/metal/device.h"
 #include "mlx/backend/metal/utils.h"
 #include "mlx/debug.h"
+#include "mlx/debug_internal.h"
 #include "mlx/primitives.h"
 #include "mlx/scheduler.h"
 #include "mlx/utils.h"
@@ -16,6 +17,8 @@ void init() {}
 
 void new_stream(Stream s) {
   assert(s.device == Device::gpu);
+  debug::remove_stream_label(s);
+  debug::detail::clear_groups(s);
   auto& encoders = metal::get_command_encoders();
   auto& d = metal::device(s.device);
   encoders.try_emplace(s.index, d, s, d.residency_set());
@@ -23,12 +26,15 @@ void new_stream(Stream s) {
 
 void new_thread_unsafe_stream(Stream s) {
   assert(s.device == Device::gpu);
+  debug::remove_stream_label(s);
+  debug::detail::clear_groups(s);
   auto& encoders = metal::get_global_command_encoders();
   auto& d = metal::device(s.device);
   encoders.try_emplace(s.index, d, s, d.residency_set());
 }
 
 void eval(array& arr) {
+  debug::detail::ScopedExecutionContext scope(debug::detail::scope_context(arr));
   auto pool = metal::new_scoped_memory_pool();
   auto s = arr.primitive().stream();
   auto& encoder = metal::get_command_encoder(s);
@@ -43,7 +49,10 @@ void eval(array& arr) {
       inputs = arr.inputs();
     }
 
-    auto& user_label = debug::current_label();
+    const auto* scope_context = debug::detail::execution_scope();
+    const auto& user_label = scope_context == nullptr
+        ? debug::current_label()
+        : scope_context->label;
     if (!user_label.empty()) {
       std::string label = user_label;
 #ifdef MLX_METAL_DEBUG

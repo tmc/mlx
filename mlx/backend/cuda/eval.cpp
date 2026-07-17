@@ -20,9 +20,16 @@ class DebugRange {
  public:
   DebugRange(const mlx::core::array& arr) {
     auto stream = arr.primitive().stream();
-    std::string label = mlx::core::debug::current_label();
-    if (mlx::core::debug::detail::has_groups()) {
-      for (const auto& group : mlx::core::debug::detail::groups(stream)) {
+    const auto* scope = mlx::core::debug::detail::execution_scope();
+    std::string label = scope == nullptr
+        ? mlx::core::debug::current_label()
+        : scope->label;
+    if ((scope != nullptr && !scope->groups.empty()) ||
+        mlx::core::debug::detail::has_groups()) {
+      const auto& groups = scope == nullptr
+          ? mlx::core::debug::detail::groups(stream)
+          : scope->groups;
+      for (const auto& group : groups) {
         if (!label.empty()) {
           label += ':';
         }
@@ -77,6 +84,8 @@ void init() {
 
 void new_stream(Stream s) {
   assert(s.device == Device::gpu);
+  debug::remove_stream_label(s);
+  debug::detail::clear_groups(s);
   auto& encoders = cu::get_command_encoders();
   auto& d = cu::device(s.device);
   encoders.try_emplace(s.index, d, s);
@@ -84,6 +93,8 @@ void new_stream(Stream s) {
 
 void new_thread_unsafe_stream(Stream s) {
   assert(s.device == Device::gpu);
+  debug::remove_stream_label(s);
+  debug::detail::clear_groups(s);
   auto& encoders = cu::get_global_command_encoders();
   auto& d = cu::device(s.device);
   encoders.try_emplace(s.index, d, s);
@@ -91,6 +102,7 @@ void new_thread_unsafe_stream(Stream s) {
 
 void eval(array& arr) {
   nvtx3::scoped_range r("gpu::eval");
+  debug::detail::ScopedExecutionContext scope(debug::detail::scope_context(arr));
   DebugRange debug_range(arr);
   // Ensure CUDA context is active on this thread. Required when MLX is called
   // from threads that have not yet established a CUDA context (e.g. thread

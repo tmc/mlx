@@ -15,8 +15,12 @@
 
 namespace mlx::core {
 
+class array;
+
 namespace debug::detail {
 struct ArrayAccess;
+struct ScopeContext;
+const std::shared_ptr<const ScopeContext>& scope_context(const array&);
 }
 
 // Forward declaration
@@ -475,6 +479,9 @@ class MLX_API array {
   ~array();
 
  private:
+  friend const std::shared_ptr<const debug::detail::ScopeContext>&
+  debug::detail::scope_context(const array&);
+
   friend struct debug::detail::ArrayAccess;
 
   // Initialize the arrays data
@@ -487,6 +494,7 @@ class MLX_API array {
     size_t size;
     Dtype dtype;
     std::shared_ptr<Primitive> primitive;
+    std::shared_ptr<const debug::detail::ScopeContext> scope_context;
 
     Status status;
 

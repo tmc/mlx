@@ -224,6 +224,9 @@ void CommandEncoder::refresh_stream_label() {
   auto label = debug::detail::stream_label(logical_stream_);
   if (!label.empty()) {
     nvtxNameCudaStreamA(stream_, label.c_str());
+  } else {
+    auto default_label = fmt::format("stream {}", logical_stream_.index);
+    nvtxNameCudaStreamA(stream_, default_label.c_str());
   }
   stream_label_generation_ = generation;
 }

@@ -1,6 +1,8 @@
 // Copyright © 2025 Apple Inc.
 #include "mlx/backend/cpu/eval.h"
 #include "mlx/backend/cpu/encoder.h"
+#include "mlx/debug.h"
+#include "mlx/debug_internal.h"
 #include "mlx/primitives.h"
 #include "mlx/scheduler.h"
 #include "mlx/utils.h"
@@ -8,11 +10,15 @@
 namespace mlx::core::cpu {
 
 void new_stream(Stream s) {
+  debug::remove_stream_label(s);
+  debug::detail::clear_groups(s);
   auto& encoders = get_command_encoders();
   encoders.try_emplace(s.index, s);
 }
 
 void new_thread_unsafe_stream(Stream s) {
+  debug::remove_stream_label(s);
+  debug::detail::clear_groups(s);
   auto& encoders = get_global_command_encoders();
   encoders.try_emplace(s.index, s);
 }

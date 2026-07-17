@@ -18,6 +18,11 @@ class TestDebug(unittest.TestCase):
         with mx.debug.group("forward", stream):
             mx.eval(mx.array([1.0]) + 1)
 
+    def test_stream_label_lifecycle(self):
+        stream = mx.default_stream(mx.default_device())
+        mx.debug.set_stream_label(stream, "temporary")
+        mx.debug.remove_stream_label(stream)
+
     def test_contexts_are_thread_local(self):
         errors = []
 

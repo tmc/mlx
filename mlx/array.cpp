@@ -3,6 +3,7 @@
 #include <unordered_map>
 
 #include "mlx/array.h"
+#include "mlx/debug_internal.h"
 #include "mlx/ops.h"
 #include "mlx/primitives.h"
 #include "mlx/transforms.h"
@@ -269,6 +270,10 @@ array::ArrayDesc::ArrayDesc(
     : shape(std::move(shape)),
       dtype(dtype),
       primitive(std::move(primitive)),
+      scope_context(
+          this->primitive == nullptr || !debug::detail::scope_active
+              ? nullptr
+              : debug::detail::capture_scope(this->primitive->stream())),
       status(Status::unscheduled),
       inputs(std::move(inputs)) {
   init();

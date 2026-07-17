@@ -103,7 +103,6 @@ class MLX_API CommandEncoder {
   }
 
   void set_queue_label(const std::string& label);
-  void set_next_command_buffer_label(std::string label);
 
  private:
   MTL::ComputeCommandEncoder* get_command_encoder();
@@ -115,7 +114,6 @@ class MLX_API CommandEncoder {
   // Buffer that stores encoded commands.
   NS::SharedPtr<MTL::CommandQueue> queue_;
   NS::SharedPtr<MTL::CommandBuffer> buffer_;
-  std::string pending_buffer_label_;
   int buffer_ops_{0};
   size_t buffer_sizes_{0};
 
@@ -258,6 +256,8 @@ MLX_API Device& device(mlx::core::Device);
 MLX_API CommandEncoder& get_command_encoder(Stream s);
 
 std::unordered_map<int, CommandEncoder>& get_command_encoders();
+// The global map is used only by new_thread_unsafe_stream and its owning
+// thread. Callers must not mutate or clear it concurrently with evaluation.
 std::unordered_map<int, CommandEncoder>& get_global_command_encoders();
 NS::SharedPtr<NS::AutoreleasePool> new_scoped_memory_pool();
 

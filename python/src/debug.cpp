@@ -91,6 +91,8 @@ void init_debug(nb::module_& m) {
   debug.def(
       "set_stream_label", &mx::debug::set_stream_label, "stream"_a, "label"_a);
   debug.def(
+      "remove_stream_label", &mx::debug::remove_stream_label, "stream"_a);
+  debug.def(
       "push_group",
       [](std::string label, std::optional<mx::Stream> stream) {
         auto selected =

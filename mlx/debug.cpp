@@ -74,9 +74,10 @@ GroupMap& group_stacks() {
   return groups;
 }
 
-std::atomic<size_t>& active_group_stacks() {
-  static std::atomic<size_t> count{0};
-  return count;
+std::atomic<uint64_t> group_generation_counter{0};
+
+uint64_t next_group_generation() {
+  return group_generation_counter.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
 struct ArrayLabel {
@@ -122,6 +123,7 @@ void push_label(const std::string& label) {
   auto& labels = label_stack();
   labels.stack.push_back(label);
   labels.rebuild();
+  detail::scope_active = true;
 }
 
 void pop_label() {
@@ -130,6 +132,7 @@ void pop_label() {
     labels.stack.pop_back();
     labels.rebuild();
   }
+  detail::scope_active = !labels.current.empty() || !group_stacks().empty();
 }
 
 const std::string& current_label() {
@@ -138,6 +141,13 @@ const std::string& current_label() {
 
 void set_label(const array& arr, const std::string& label) {
   std::unique_lock lock(array_labels_mutex());
+  for (auto it = array_labels().begin(); it != array_labels().end();) {
+    if (it->second.owner.expired()) {
+      it = array_labels().erase(it);
+    } else {
+      ++it;
+    }
+  }
   array_labels().insert_or_assign(
       arr.id(), ArrayLabel{detail::ArrayAccess::owner(arr), label});
   has_array_labels().store(true, std::memory_order_release);
@@ -160,14 +170,21 @@ void set_stream_label(Stream stream, const std::string& label) {
   labels.generation.fetch_add(1, std::memory_order_release);
 }
 
+void remove_stream_label(Stream stream) {
+  auto& labels = stream_labels();
+  {
+    std::lock_guard lock(labels.mutex);
+    labels.labels.erase(stream_key(stream));
+  }
+  labels.generation.fetch_add(1, std::memory_order_release);
+}
+
 void push_group(const std::string& label, Stream stream) {
   auto& groups = group_stacks()[stream_key(stream)];
-  if (groups.stack.empty()) {
-    active_group_stacks().fetch_add(1, std::memory_order_relaxed);
-  }
   groups.stack.push_back(label);
-  ++groups.generation;
+  groups.generation = next_group_generation();
   groups.rebuild();
+  detail::scope_active = true;
 }
 
 void pop_group(Stream stream) {
@@ -176,21 +193,60 @@ void pop_group(Stream stream) {
     return;
   }
   it->second.stack.pop_back();
-  ++it->second.generation;
+  it->second.generation = next_group_generation();
   it->second.rebuild();
   if (it->second.stack.empty()) {
-    active_group_stacks().fetch_sub(1, std::memory_order_relaxed);
+    group_stacks().erase(it);
   }
+  detail::scope_active = !label_stack().current.empty() || !group_stacks().empty();
 }
 
 namespace detail {
+
+thread_local bool scope_active = false;
+thread_local const ScopeContext* active_scope = nullptr;
+
+const std::shared_ptr<const ScopeContext>& scope_context(const array& arr) {
+  return arr.array_desc_->scope_context;
+}
+
+std::shared_ptr<const ScopeContext> capture_scope(Stream stream) {
+  if (!detail::scope_active) {
+    return nullptr;
+  }
+  auto context = std::make_shared<ScopeContext>(stream);
+  context->label = label_stack().current;
+  auto it = group_stacks().find(stream_key(stream));
+  if (it != group_stacks().end()) {
+    context->groups = it->second.stack;
+    context->group_generation = it->second.generation;
+  }
+  if (context->label.empty() && context->groups.empty()) {
+    return nullptr;
+  }
+  return context;
+}
+
+const ScopeContext* execution_scope() {
+  return active_scope;
+}
+
+ScopedExecutionContext::ScopedExecutionContext(
+    const std::shared_ptr<const ScopeContext>& context)
+    : previous_(active_scope) {
+  active_scope = context.get();
+}
+
+ScopedExecutionContext::~ScopedExecutionContext() {
+  active_scope = previous_;
+}
 
 bool has_labels() {
   return has_array_labels().load(std::memory_order_relaxed);
 }
 
 bool has_groups() {
-  return active_group_stacks().load(std::memory_order_relaxed) != 0;
+  return !group_stacks().empty();
 }
 
 std::string label(const array& arr) {
@@ -214,9 +270,11 @@ std::string label(const array& arr) {
   if (it == array_labels().end()) {
     return {};
   }
-  array_labels().erase(it);
-  if (array_labels().empty()) {
-    has_array_labels().store(false, std::memory_order_release);
+  if (!same_owner(it->second.owner, owner)) {
+    array_labels().erase(it);
+    if (array_labels().empty()) {
+      has_array_labels().store(false, std::memory_order_release);
+    }
   }
   return {};
 }
@@ -244,6 +302,16 @@ const std::vector<std::string>& groups(Stream stream) {
 uint64_t group_generation(Stream stream) {
   auto it = group_stacks().find(stream_key(stream));
   return it == group_stacks().end() ? 0 : it->second.generation;
+}
+
+void clear_groups(Stream stream) {
+  auto it = group_stacks().find(stream_key(stream));
+  if (it == group_stacks().end()) {
+    return;
+  }
+  next_group_generation();
+  group_stacks().erase(it);
+  detail::scope_active = !label_stack().current.empty() || !group_stacks().empty();
 }
 
 } // namespace detail

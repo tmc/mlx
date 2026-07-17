@@ -7,6 +7,9 @@ FetchContent_MakeAvailable(doctest)
 add_executable(tests ${PROJECT_SOURCE_DIR}/tests/tests.cpp)
 target_sources(tests PRIVATE debug_tests.cpp)
 
+add_executable(debug_benchmark debug_benchmark.cpp)
+target_link_libraries(debug_benchmark PRIVATE mlx)
+
 if(MLX_BUILD_METAL OR MLX_BUILD_CUDA)
   set(METAL_TEST_SOURCES gpu_tests.cpp)
 endif()

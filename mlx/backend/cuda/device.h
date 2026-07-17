@@ -217,6 +217,8 @@ MLX_API Device& device(mlx::core::Device d);
 MLX_API CommandEncoder& get_command_encoder(Stream s);
 
 std::unordered_map<int, CommandEncoder>& get_command_encoders();
+// The global map is intentionally thread-unsafe; its stream owner must not
+// mutate or clear it concurrently with evaluation.
 std::unordered_map<int, CommandEncoder>& get_global_command_encoders();
 
 } // namespace mlx::core::cu

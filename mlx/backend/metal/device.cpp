@@ -442,10 +442,6 @@ void CommandEncoder::set_queue_label(const std::string& label) {
   queue_->setLabel(NS::String::string(label.c_str(), NS::UTF8StringEncoding));
 }
 
-void CommandEncoder::set_next_command_buffer_label(std::string label) {
-  pending_buffer_label_ = std::move(label);
-}
-
 void CommandEncoder::end_encoding() {
   // Each command encoder has a unique fence. We also store a map of
   // all previous outputs of command encoders to their corresponding fence.
@@ -582,13 +578,6 @@ void CommandEncoder::commit(std::function<void()> completion) {
       });
   buffer_->commit();
   buffer_ = NS::RetainPtr(queue_->commandBufferWithUnretainedReferences());
-  if (!pending_buffer_label_.empty()) {
-    auto pool = new_scoped_memory_pool();
-    buffer_->setLabel(
-        NS::String::string(
-            pending_buffer_label_.c_str(), NS::UTF8StringEncoding));
-    pending_buffer_label_.clear();
-  }
   buffer_ops_ = 0;
   buffer_sizes_ = 0;
 }
@@ -612,6 +601,8 @@ MTL::ComputeCommandEncoder* CommandEncoder::get_command_encoder() {
     auto label = debug::detail::stream_label(stream_);
     if (!label.empty()) {
       set_queue_label(label);
+    } else {
+      queue_->setLabel(nullptr);
     }
     stream_label_generation_ = generation;
   }
@@ -625,8 +616,14 @@ MTL::ComputeCommandEncoder* CommandEncoder::get_command_encoder() {
     // have handled the error in synchronize() or Event::wait().
     error_.reset();
   }
-  if (applied_debug_groups_ != 0 || debug::detail::has_groups()) {
-    auto group_generation = debug::detail::group_generation(stream_);
+  const auto* scope = debug::detail::execution_scope();
+  if (applied_debug_groups_ != 0 ||
+      (scope != nullptr && !scope->groups.empty()) ||
+      debug::detail::has_groups()) {
+    auto group_generation =
+        scope != nullptr && scope->stream == stream_
+        ? scope->group_generation
+        : debug::detail::group_generation(stream_);
     if (group_generation == debug_group_generation_) {
       return encoder_.get();
     }
@@ -635,7 +632,11 @@ MTL::ComputeCommandEncoder* CommandEncoder::get_command_encoder() {
       encoder_->popDebugGroup();
       --applied_debug_groups_;
     }
-    for (const auto& group : debug::detail::groups(stream_)) {
+    const auto& groups =
+        scope != nullptr && scope->stream == stream_
+        ? scope->groups
+        : debug::detail::groups(stream_);
+    for (const auto& group : groups) {
       encoder_->pushDebugGroup(
           NS::String::string(group.c_str(), NS::UTF8StringEncoding));
       ++applied_debug_groups_;

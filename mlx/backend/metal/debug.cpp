@@ -9,6 +9,7 @@
 #include "mlx/array.h"
 #include "mlx/backend/metal/device.h"
 #include "mlx/backend/metal/metal.h"
+#include "mlx/debug.h"
 #include "mlx/debug_internal.h"
 #include "mlx/dtype_utils.h"
 
@@ -42,7 +43,9 @@ void set_encoder_debug_label(
   }
   auto pool = new_scoped_memory_pool();
   auto encoder = static_cast<MTL::ComputeCommandEncoder*>(mtl_encoder);
-  const auto& user_label = debug::current_label();
+  const auto* scope = debug::detail::execution_scope();
+  const auto& user_label =
+      scope == nullptr ? debug::current_label() : scope->label;
   if (user_label.empty() && !automatic_labels()) {
     return;
   }

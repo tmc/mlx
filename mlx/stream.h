@@ -35,7 +35,10 @@ MLX_API void set_default_stream(Stream s);
 /** Make a new stream on the given device. */
 MLX_API Stream new_stream(Device d);
 
-/** Make a new stream that can be used in any thread. */
+/**
+ * Make a stream shared by threads under external serialization. The stream's
+ * command encoder is not safe for concurrent mutation.
+ */
 MLX_API Stream new_thread_unsafe_stream(Device d);
 
 /** Make a new stream that will be unique per thread. */

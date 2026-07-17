@@ -10,8 +10,12 @@ them as NVTX ranges and CUDA stream names.
 Python
 ------
 
-Labels describe evaluation scopes. Because MLX evaluates lazily, enter the
-context around ``eval``, not only around graph construction.
+Labels describe evaluation scopes. MLX captures the active label and group
+scope when a lazy array is constructed, so a scope around graph construction
+is sufficient even when evaluation is deferred or moved to another thread.
+If construction and evaluation use different scopes, the captured
+construction-time scope takes precedence; evaluation-time thread-local state
+is used only for arrays constructed outside a scope.
 
 .. code-block:: python
 
@@ -37,6 +41,7 @@ group pushed on one thread does not affect evaluation on another thread.
    mx.debug.set_stream_label(stream, "model")
    with mx.debug.group("forward", stream):
        mx.eval(x + y)
+   mx.debug.remove_stream_label(stream)
 
 C++
 ---
