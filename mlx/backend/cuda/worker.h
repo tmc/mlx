@@ -23,6 +23,9 @@ class Worker : public std::enable_shared_from_this<Worker> {
   Worker& operator=(const Worker&) = delete;
 
   void start();
+  // Call once from the owning encoder after synchronization, with no further
+  // submissions. On Linux, wait for signal callbacks and worker exit.
+  // Never call from this worker or a CUDA callback.
   void stop();
 
   // Add a pending |task| that will run when consumed or commited.
