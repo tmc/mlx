@@ -272,16 +272,21 @@ void RoPE::eval_gpu(
     N *= in.shape(i);
   }
 
-  // if input has < 4 dims or row_contiguous: if we can donate the input, reuse
-  // the buffer if in is not donatable, we allocate a new buffer for the output
-  // with the same strides as input if input has > 4 dims and is not
-  // row_contigous, we copy the input to a new buffer (we should not be here
-  // often) in case it is partial rotation: we reuse if input is donatable and
-  // copy if it is not donatable
+  // If the input has <= 4 dims or is row contiguous, the kernel can read it
+  // through its strides. If its layout is also dense, the output takes that
+  // layout: we reuse the input buffer if it is donatable, and otherwise
+  // allocate data_size elements with the input's strides, or copy the input in
+  // case it is a partial rotation. A layout that is not dense cannot be given
+  // to the output: a view with holes, such as one head of a fused QKV
+  // projection, reaches past data_size elements, and a broadcast aliases
+  // elements. Such inputs get a row contiguous output, or a copy in case it is
+  // a partial rotation. Inputs with > 4 dims that are not row contiguous are
+  // copied to a new buffer (we should not be here often).
   bool partial = dims_ < D;
+  bool dense = in.flags().contiguous && in.data_size() == in.size();
   bool layout_ok = ndim <= 4 || in.flags().row_contiguous;
 
-  if (layout_ok) {
+  if (layout_ok && dense) {
     if (in.is_donatable()) {
       donated = true;
       out.copy_shared_buffer(in);
@@ -297,6 +302,8 @@ void RoPE::eval_gpu(
           in.flags().row_contiguous ? CopyType::Vector : CopyType::General;
       copy_gpu(in, out, ctype, s);
     }
+  } else if (layout_ok && !partial) {
+    out.set_data(cu::malloc_async(out.nbytes(), encoder));
   } else {
     donated = true;
     copy_gpu(in, out, CopyType::General, s);
