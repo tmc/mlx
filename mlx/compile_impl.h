@@ -6,6 +6,7 @@
 
 #include "mlx/api.h"
 #include "mlx/array.h"
+#include "mlx/compile.h"
 
 namespace mlx::core::detail {
 
@@ -26,6 +27,15 @@ MLX_API ArrayFnWithExtra compile(
     std::uintptr_t fun_id,
     bool shapeless,
     std::vector<uint64_t> constants);
+
+// Use mode for every trace without changing the process-global mode.
+MLX_API std::function<std::vector<array>(const std::vector<array>&)>
+compile_with_mode(
+    std::function<std::vector<array>(const std::vector<array>&)> fun,
+    std::uintptr_t fun_id,
+    bool shapeless,
+    std::vector<uint64_t> constants,
+    CompileMode mode);
 
 // Get the compiler cache of current thread.
 class CompileCache;

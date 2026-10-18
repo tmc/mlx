@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <map>
+#include <optional>
 #include <shared_mutex>
 #include <sstream>
 #include <unordered_map>
@@ -302,10 +303,11 @@ std::uintptr_t get_function_address(const std::function<T(U...)>& fun) {
 class CompileCache {
  public:
   struct CacheEntry {
-    CacheEntry(Stream stream, bool shapeless)
-        : stream(stream), shapeless(shapeless) {};
+    CacheEntry(Stream stream, bool shapeless, std::optional<CompileMode> mode)
+        : stream(stream), shapeless(shapeless), mode(mode) {};
     Stream stream;
     bool shapeless;
+    std::optional<CompileMode> mode;
     std::vector<array> inputs;
     std::vector<array> outputs;
     std::vector<array> tape;
@@ -326,7 +328,8 @@ class CompileCache {
       std::uintptr_t fun_id,
       const std::vector<array>& inputs,
       bool shapeless,
-      const std::vector<uint64_t>& constants) {
+      const std::vector<uint64_t>& constants,
+      std::optional<CompileMode> mode) {
     // Find the cache entries for |fun_id| in a thread-safe way.
     auto entries_ptr = [&]() {
       // Lookup with shared lock.
@@ -376,7 +379,7 @@ class CompileCache {
       if (entry.stream != stream) {
         continue;
       }
-      if (entry.shapeless != shapeless) {
+      if (entry.shapeless != shapeless || entry.mode != mode) {
         continue;
       }
 
@@ -387,7 +390,7 @@ class CompileCache {
       }
     }
     // Otherwise append a new cache entry
-    entries.push_back(CacheEntry{stream, shapeless});
+    entries.push_back(CacheEntry{stream, shapeless, mode});
     return {entries.back(), std::move(entries_ptr)};
   }
 
@@ -1116,12 +1119,14 @@ bool skip_compile() {
       !(compile_available_for_device(default_device()));
 }
 
-ArrayFnWithExtra compile(
+static ArrayFnWithExtra compile_impl(
     ArrayFnWithExtra fun,
     std::uintptr_t fun_id,
-    bool shapeless /* = false */,
-    std::vector<uint64_t> constants /* = {} */) {
-  if (skip_compile()) {
+    bool shapeless,
+    std::vector<uint64_t> constants,
+    std::optional<CompileMode> mode) {
+  if ((mode ? *mode == CompileMode::disabled : skip_compile()) ||
+      !compile_available_for_device(default_device())) {
     return fun;
   }
   if (!fun) {
@@ -1132,6 +1137,7 @@ ArrayFnWithExtra compile(
   return [fun = std::move(fun),
           fun_id,
           shapeless,
+          mode,
           constants = std::move(constants)](const std::vector<array>& inputs) {
     // If the inputs are tracers, trace the original graph
     if (std::any_of(inputs.begin(), inputs.end(), [](auto& in) {
@@ -1141,8 +1147,8 @@ ArrayFnWithExtra compile(
     }
 
     // Find a cache entry with the correct inputs
-    auto [entry, entries_ptr] =
-        compile_cache_unsafe()->find(fun_id, inputs, shapeless, constants);
+    auto [entry, entries_ptr] = compile_cache_unsafe()->find(
+        fun_id, inputs, shapeless, constants, mode);
     static_assert(std::is_reference_v<decltype(entry)>);
 
     // No matching cache entry existed, so compile
@@ -1161,15 +1167,15 @@ ArrayFnWithExtra compile(
           compile_dfs(entry.inputs, entry.outputs, inputs);
 
       // Simplify the tape
-      auto mode = compile_mode().load();
-      if (mode != CompileMode::no_simplify) {
+      auto selected_mode = mode ? *mode : compile_mode().load();
+      if (selected_mode != CompileMode::no_simplify) {
         compile_simplify(
             entry.tape, parents_map, entry.outputs, /* passes */ 3);
       }
 
       // Kernel fusion to generate Compiled primitives. The tape and
       // new outputs must be updated accordingly
-      if (mode != CompileMode::no_fuse) {
+      if (selected_mode != CompileMode::no_fuse) {
         compile_fuse(entry.tape, parents_map, entry.inputs, entry.outputs);
       }
 
@@ -1185,6 +1191,37 @@ ArrayFnWithExtra compile(
         compile_replace(
             entry.tape, entry.inputs, entry.outputs, inputs, shapeless),
         entry.extra};
+  };
+}
+
+ArrayFnWithExtra compile(
+    ArrayFnWithExtra fun,
+    std::uintptr_t fun_id,
+    bool shapeless,
+    std::vector<uint64_t> constants) {
+  return compile_impl(
+      std::move(fun), fun_id, shapeless, std::move(constants), std::nullopt);
+}
+
+std::function<std::vector<array>(const std::vector<array>&)> compile_with_mode(
+    std::function<std::vector<array>(const std::vector<array>&)> fun,
+    std::uintptr_t fun_id,
+    bool shapeless,
+    std::vector<uint64_t> constants,
+    CompileMode mode) {
+  if (!fun) {
+    throw std::invalid_argument(
+        "[compile] Cannot compile a function without a target.");
+  }
+  ArrayFnWithExtra fun_with_extra =
+      [fun = std::move(fun)](const std::vector<array>& inputs) {
+        return ArraysAndExtra{fun(inputs), nullptr};
+      };
+  auto compiled_fun = compile_impl(
+      std::move(fun_with_extra), fun_id, shapeless, std::move(constants), mode);
+  return [compiled_fun =
+              std::move(compiled_fun)](const std::vector<array>& inputs) {
+    return compiled_fun(inputs).first;
   };
 }
 

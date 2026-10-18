@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 
+#include "mlx/compile_impl.h"
 #include "mlx/mlx.h"
 #include "mlx/primitives.h"
 
@@ -874,4 +875,70 @@ TEST_CASE("test compile throwing first trace does not poison cache") {
   auto out = cfun({});
   REQUIRE_EQ(out.size(), 1);
   CHECK_EQ(out[0].item<float>(), 3.0f);
+}
+
+TEST_CASE("test fixed compile modes have separate caches") {
+  auto fun = [](const std::vector<array>& inputs) {
+    return std::vector<array>{exp(inputs[0]) + exp(inputs[0])};
+  };
+  auto id = reinterpret_cast<std::uintptr_t>(&fun);
+  auto cache = detail::compile_cache();
+  auto no_fuse =
+      detail::compile_with_mode(fun, id, false, {}, CompileMode::no_fuse);
+  auto enabled =
+      detail::compile_with_mode(fun, id, false, {}, CompileMode::enabled);
+  auto ambient = detail::compile(fun, id, false, {});
+  auto input = array({1.0f, 2.0f});
+
+  set_compile_mode(CompileMode::enabled);
+  auto a = no_fuse({input})[0];
+  CHECK_NE(typeid(a.primitive()), typeid(Compiled));
+  auto b = enabled({input})[0];
+  CHECK_EQ(typeid(b.primitive()), typeid(Compiled));
+
+  set_compile_mode(CompileMode::no_fuse);
+  auto c = ambient({input})[0];
+  CHECK_NE(typeid(c.primitive()), typeid(Compiled));
+  auto d = enabled({array({1.0f, 2.0f, 3.0f})})[0];
+  CHECK_EQ(typeid(d.primitive()), typeid(Compiled));
+  set_compile_mode(CompileMode::enabled);
+  detail::compile_erase(cache, id);
+}
+
+TEST_CASE("test fixed mode contains an ambient compiled function") {
+  auto inner = compile([](const std::vector<array>& inputs) {
+    return std::vector<array>{exp(inputs[0]) + exp(inputs[0])};
+  });
+  auto fun = [inner](const std::vector<array>& inputs) {
+    return inner(inputs);
+  };
+  auto id = reinterpret_cast<std::uintptr_t>(&fun);
+  auto cache = detail::compile_cache();
+  auto outer =
+      detail::compile_with_mode(fun, id, false, {}, CompileMode::no_fuse);
+  auto out = outer({array({1.0f, 2.0f})})[0];
+  CHECK_NE(typeid(out.primitive()), typeid(Compiled));
+  detail::compile_erase(cache, id);
+}
+
+TEST_CASE("test ambient disabled and explicit enabled") {
+  int calls = 0;
+  auto fun = [&calls](const std::vector<array>& inputs) {
+    ++calls;
+    return std::vector<array>{exp(inputs[0]) + exp(inputs[0])};
+  };
+  auto id = reinterpret_cast<std::uintptr_t>(&fun);
+  auto cache = detail::compile_cache();
+  set_compile_mode(CompileMode::disabled);
+  auto ambient = detail::compile(fun, id, false, {});
+  auto enabled =
+      detail::compile_with_mode(fun, id, false, {}, CompileMode::enabled);
+  auto input = array({1.0f, 2.0f});
+  ambient({input});
+  ambient({input});
+  CHECK_EQ(calls, 2);
+  auto out = enabled({input})[0];
+  CHECK_EQ(typeid(out.primitive()), typeid(Compiled));
+  set_compile_mode(CompileMode::enabled);
+  detail::compile_erase(cache, id);
 }
